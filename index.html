@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Common Sense</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #FFF;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            touch-action: none; /* prevent browser gestures while dragging */
+        }
+        
+        #camera-controls {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: #666;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            z-index: 1000;
+        }
+        #camera-controls label {
+            display: inline-block;
+            width: 30px;
+        }
+        #camera-controls input {
+            width: 140px;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            border: 1px solid #ccc;
+            padding: 1px 3px;
+            background: rgba(255,255,255,0.8);
+        }
+        #camera-controls .row {
+            margin-bottom: 2px;
+        }
+        #camera-controls button {
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            padding: 1px 5px;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            background: rgba(255,255,255,0.8);
+        }
+        #camera-controls button.frozen {
+            background: #aaf;
+            border-color: #66a;
+        }
+    </style>
+</head>
+<body>
+    <div id="camera-controls">
+        <div class="row"><label>pos</label>
+            y <input id="pos-y" type="number" step="0.0001">
+            <button id="freeze-pos-y">freeze</button>
+            <button id="rand-pos-y">rand</button>
+            <button id="flip-pos-y">flip</button>
+        </div>
+        <div class="row"><label>rot</label>
+            x <input id="rot-x" type="text">
+            <button id="freeze-rot-x">freeze</button>
+            <button id="rand-rot-x">rand</button>
+        </div>
+        <div class="row"><label>slices</label>
+            <input id="num-colors" type="number" step="1">
+            <button id="freeze-slices">freeze</button>
+            <button id="rand-slices">rand</button>
+        </div>
+        <div class="row">
+            <button id="preset-1">preset 1</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let frozenPosY = false, frozenRotX = false, frozenSlices = false;
+        let numColors = Math.floor(Math.random() * 8000) + 1;
+        let scene, camera, renderer;
+        let morphingObject, mainLight, sideLight, endCircle;
+        let rainbowCircles = [];
+        let rainbowGroup;
+        let isMouseDown = false;
+        let mouseX = 0, mouseY = 0;
+        let rotationX = Math.PI + Math.random() * 0.001, rotationY = Math.random() * Math.PI * 2;
+        let R = 160; // dynamic radius, set in init/resize
+        let rainbowSpinAngle = 0;
+
+        function computeRadius() {
+            const minDim = Math.min(window.innerWidth, window.innerHeight);
+            return Math.max(20, Math.floor(minDim * 0.45));
+        }
+
+        function positionCameraToFit(fillRatio = 0.75) {
+            // Position camera looking at the rainbow sphere center
+            const sphereZ = -1.25 * R;
+            const sphereRadius = R * 0.95;
+            // Place camera so the sphere fills the viewport by the given ratio
+            const vFov = (camera.fov * Math.PI) / 180;
+            const t = Math.tan(vFov / 2);
+            const aspect = window.innerWidth / window.innerHeight;
+            const r = Math.max(0.01, fillRatio);
+            const dV = sphereRadius / (r * t);
+            const dH = sphereRadius / (r * t * aspect);
+            const distance = Math.max(dV, dH);
+            const yPos = Math.random() < 0.5 ? -360 : -0.036;
+            camera.position.set(0, yPos, sphereZ);
+            camera.up.set(0, 0, 1);
+            camera.lookAt(0, 0, sphereZ);
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xffffff);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            R = computeRadius();
+            positionCameraToFit(1.175);
+
+            createMorphingObject();
+            createEndCircle();
+            createRainbowCircles();
+            setupLighting();
+            setupEventListeners();
+            setupCameraControls();
+            animate();
+        }
+
+        function createMorphingObject() {
+            if (morphingObject) {
+                morphingObject.geometry.dispose();
+                morphingObject.material.dispose();
+                scene.remove(morphingObject);
+                morphingObject = undefined;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            const indices = [];
+
+            const layers = 40;
+            const segments = 64;
+            const rectHalfX = R * 0.75;
+            const rectHalfY = R * 0.5;
+
+            for (let z = 0; z < layers; z++) {
+                const morphFactor = z / (layers - 1);
+                const smoothFactor = morphFactor * morphFactor * (3 - 2 * morphFactor);
+                const zPos = -1.25 * R + (2.5 * R) * (z / (layers - 1));
+
+                for (let i = 0; i < segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+
+                    let x = Math.cos(angle) * R;
+                    let y = Math.sin(angle) * R;
+
+                    if (smoothFactor > 0) {
+                        const rectX = x > 0 ? rectHalfX : -rectHalfX;
+                        const rectY = y > 0 ? rectHalfY : -rectHalfY;
+                        x = x + (rectX - x) * smoothFactor;
+                        y = y + (rectY - y) * smoothFactor;
+                    }
+
+                    let sphereZ = 0;
+                    if (smoothFactor < 0.1) {
+                        const d = Math.hypot(x, y);
+                        if (d <= R) sphereZ = Math.sqrt(R * R - d * d);
+                    } else if (smoothFactor < 0.6) {
+                        const d = Math.hypot(x, y);
+                        if (d <= R) sphereZ = Math.sqrt(Math.max(0, R * R - d * d)) * (1 - (smoothFactor - 0.1) / 0.5);
+                    }
+                    const finalZ = zPos + sphereZ;
+
+                    vertices.push(x, y, finalZ);
+                }
+            }
+
+            for (let z = 0; z < layers - 1; z++) {
+                for (let i = 0; i < segments; i++) {
+                    const current = z * segments + i;
+                    const next = z * segments + ((i + 1) % segments);
+                    const below = (z + 1) * segments + i;
+                    const belowNext = (z + 1) * segments + ((i + 1) % segments);
+                    indices.push(current, below, next);
+                    indices.push(next, below, belowNext);
+                }
+            }
+
+            geometry.setIndex(indices);
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshLambertMaterial({
+                color: 0x000000,
+                side: THREE.DoubleSide
+            });
+
+            morphingObject = new THREE.Mesh(geometry, material);
+            morphingObject.castShadow = true;
+            morphingObject.receiveShadow = true;
+            morphingObject.visible = false;
+            scene.add(morphingObject);
+        }
+
+        function createEndCircle() {
+            if (endCircle) {
+                endCircle.geometry.dispose();
+                endCircle.material.dispose();
+                scene.remove(endCircle);
+                endCircle = undefined;
+            }
+
+            // Create a circle at the far end of the tunnel
+            const circleGeometry = new THREE.CircleGeometry(R * 0.95, 64);
+            const circleMaterial = new THREE.MeshBasicMaterial({
+                color: 0x000000,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0
+            });
+
+            endCircle = new THREE.Mesh(circleGeometry, circleMaterial);
+            // Position at the circular end of the tunnel (zPos at first layer)
+            endCircle.position.z = -1.25 * R;
+            endCircle.visible = false;
+            scene.add(endCircle);
+        }
+
+        function createRainbowCircles() {
+            // Clear existing rainbow circles
+            if (rainbowGroup) {
+                rainbowCircles.forEach(group => {
+                    group.children.forEach(child => {
+                        child.geometry.dispose();
+                        child.material.dispose();
+                    });
+                });
+                scene.remove(rainbowGroup);
+            }
+            rainbowCircles = [];
+            rainbowGroup = new THREE.Group();
+            rainbowGroup.position.z = -1.25 * R; // center the group at the sphere's z position
+
+            // Generate 2176 colors for a smooth rainbow spectrum
+            // numColors is controlled by the global variable
+            const colors = [];
+
+            // Helper function to convert HSL to RGB hex
+            function hslToHex(h, s, l) {
+                const c = (1 - Math.abs(2 * l - 1)) * s;
+                const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+                const m = l - c / 2;
+                let r, g, b;
+
+                if (h < 60) { r = c; g = x; b = 0; }
+                else if (h < 120) { r = x; g = c; b = 0; }
+                else if (h < 180) { r = 0; g = c; b = x; }
+                else if (h < 240) { r = 0; g = x; b = c; }
+                else if (h < 300) { r = x; g = 0; b = c; }
+                else { r = c; g = 0; b = x; }
+
+                const ri = Math.round((r + m) * 255);
+                const gi = Math.round((g + m) * 255);
+                const bi = Math.round((b + m) * 255);
+
+                return (ri << 16) | (gi << 8) | bi;
+            }
+
+            // Generate rainbow colors across the full spectrum
+            for (let i = 0; i < numColors; i++) {
+                const hue = (i / numColors) * 360; // 0 to 360 degrees (full spectrum)
+                colors.push(hslToHex(hue, 1.0, 0.5));
+            }
+
+            const endCircleRadius = R * 0.95;
+            const numCircles = colors.length;
+
+            for (let i = 0; i < numCircles; i++) {
+                // Each slice fans out radially around the y-axis
+                const angle = (i / numCircles) * Math.PI; // 0 to 180 degrees (full sphere coverage)
+
+                // Create a group for this circle (to hold both the face and the edge)
+                const circleGroup = new THREE.Group();
+
+                // Create the colored circle face (all same radius)
+                const circleGeometry = new THREE.CircleGeometry(endCircleRadius, 64);
+                const circleMaterial = new THREE.MeshBasicMaterial({
+                    color: colors[i],
+                    side: THREE.DoubleSide
+                });
+                const circleMesh = new THREE.Mesh(circleGeometry, circleMaterial);
+                circleGroup.add(circleMesh);
+
+                // Create the black edge ring
+                if (endCircleRadius > 2) {
+                    const ringGeometry = new THREE.RingGeometry(endCircleRadius - 2, endCircleRadius, 64);
+                    const ringMaterial = new THREE.MeshBasicMaterial({
+                        color: 0x000000,
+                        side: THREE.DoubleSide
+                    });
+                    const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                    circleGroup.add(ringMesh);
+                }
+
+                // Rotate each slice to its own angle around the y-axis
+                circleGroup.rotation.y = angle;
+
+                rainbowGroup.add(circleGroup);
+                rainbowCircles.push(circleGroup);
+            }
+
+            scene.add(rainbowGroup);
+        }
+
+        function setupLighting() {
+            if (mainLight) scene.remove(mainLight);
+            if (sideLight) scene.remove(sideLight);
+
+            mainLight = new THREE.PointLight(0xffffff, 0.6, R * 20);
+            mainLight.position.set(-0.56 * R, -0.31 * R, 1.9 * R);
+            mainLight.castShadow = true;
+            mainLight.shadow.mapSize.width = 1024;
+            mainLight.shadow.mapSize.height = 1024;
+            scene.add(mainLight);
+
+            sideLight = new THREE.PointLight(0xffffff, 0.9, R * 20);
+            sideLight.position.set(1.25 * R, 0, 0.1 * R);
+            scene.add(sideLight);
+
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.25);
+            scene.add(ambientLight);
+        }
+
+        function setupEventListeners() {
+            renderer.domElement.addEventListener('mousedown', onMouseDown);
+            renderer.domElement.addEventListener('mousemove', onMouseMove);
+            renderer.domElement.addEventListener('mouseup', onMouseUp);
+            // Touch support
+            renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: false });
+            renderer.domElement.addEventListener('touchmove', onTouchMove, { passive: false });
+            renderer.domElement.addEventListener('touchend', onTouchEnd, { passive: false });
+            renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onMouseDown(event) {
+            isMouseDown = true;
+            mouseX = event.clientX;
+            mouseY = event.clientY;
+        }
+
+        function onMouseMove(event) {
+            if (!isMouseDown) return;
+            const deltaX = event.clientX - mouseX;
+            const deltaY = event.clientY - mouseY;
+            if (!frozenRotX) {
+                rotationX += deltaY * 0.01;
+                rotationX = Math.max(Math.PI, Math.min(Math.PI + 0.001, rotationX));
+            }
+            mouseX = event.clientX;
+            mouseY = event.clientY;
+        }
+
+        function onMouseUp() { isMouseDown = false; }
+
+        // Touch handlers
+        function onTouchStart(e) {
+            if (!e.touches || e.touches.length === 0) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            isMouseDown = true;
+            mouseX = t.clientX;
+            mouseY = t.clientY;
+        }
+
+        function onTouchMove(e) {
+            if (!isMouseDown || !e.touches || e.touches.length === 0) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            const deltaX = t.clientX - mouseX;
+            const deltaY = t.clientY - mouseY;
+            if (!frozenRotX) {
+                rotationX += deltaY * 0.01;
+                rotationX = Math.max(Math.PI, Math.min(Math.PI + 0.001, rotationX));
+            }
+            mouseX = t.clientX;
+            mouseY = t.clientY;
+        }
+
+        function onTouchEnd(e) {
+            e.preventDefault();
+            isMouseDown = false;
+        }
+
+        function onWheel(e) {
+            e.preventDefault();
+            const factor = e.deltaY > 0 ? 1.05 : 0.95;
+            const sphereCenter = new THREE.Vector3(0, 0, -1.25 * R);
+            camera.position.sub(sphereCenter).multiplyScalar(factor).add(sphereCenter);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            R = computeRadius();
+            positionCameraToFit(1.8);
+            createMorphingObject();
+            createEndCircle();
+            createRainbowCircles();
+            setupLighting();
+        }
+
+        function parseValue(str) {
+            str = str.trim().replace(/π/g, 'pi').replace(/PI/g, 'pi');
+            // Handle expressions like pi, pi/2, 2*pi, -pi/4, 3pi/2
+            str = str.replace(/(\d)pi/g, '$1*pi'); // 3pi -> 3*pi
+            str = str.replace(/pi/g, String(Math.PI));
+            try { return Function('"use strict"; return (' + str + ')')(); }
+            catch(e) { return NaN; }
+        }
+
+        function setupCameraControls() {
+            document.getElementById('pos-y').addEventListener('change', function() {
+                if (frozenPosY) return;
+                const v = parseValue(this.value); if (!isNaN(v)) camera.position.y = v;
+            });
+            document.getElementById('rot-x').addEventListener('change', function() {
+                if (frozenRotX) return;
+                let v = parseValue(this.value);
+                if (!isNaN(v)) {
+                    v = Math.max(Math.PI, Math.min(Math.PI + 0.001, v));
+                    rotationX = v;
+                }
+            });
+
+            document.getElementById('freeze-pos-y').addEventListener('click', function() {
+                frozenPosY = !frozenPosY;
+                this.classList.toggle('frozen', frozenPosY);
+                this.textContent = frozenPosY ? 'frozen' : 'freeze';
+            });
+            document.getElementById('freeze-rot-x').addEventListener('click', function() {
+                frozenRotX = !frozenRotX;
+                this.classList.toggle('frozen', frozenRotX);
+                this.textContent = frozenRotX ? 'frozen' : 'freeze';
+            });
+
+            document.getElementById('rand-pos-y').addEventListener('click', function() {
+                if (frozenPosY) return;
+                camera.position.y = (Math.random() - 0.5) * 2000;
+            });
+            document.getElementById('flip-pos-y').addEventListener('click', function() {
+                if (frozenPosY) return;
+                camera.position.y = camera.position.y <= -1 ? -0.036 : -360;
+            });
+            document.getElementById('rand-rot-x').addEventListener('click', function() {
+                if (frozenRotX) return;
+                rotationX = Math.PI + Math.random() * 0.001;
+            });
+
+            const numColorsInput = document.getElementById('num-colors');
+            numColorsInput.value = numColors;
+            numColorsInput.addEventListener('change', function() {
+                if (frozenSlices) return;
+                const v = parseInt(this.value);
+                if (v > 0 && v <= 50000) {
+                    numColors = v;
+                    createRainbowCircles();
+                }
+            });
+
+            document.getElementById('freeze-slices').addEventListener('click', function() {
+                frozenSlices = !frozenSlices;
+                this.classList.toggle('frozen', frozenSlices);
+                this.textContent = frozenSlices ? 'frozen' : 'freeze';
+            });
+            document.getElementById('rand-slices').addEventListener('click', function() {
+                if (frozenSlices) return;
+                numColors = Math.floor(Math.random() * 8000) + 1;
+                numColorsInput.value = numColors;
+                createRainbowCircles();
+            });
+
+            document.getElementById('preset-1').addEventListener('click', function() {
+                camera.position.y = -384.1353;
+                rotationX = 3.142452397106;
+                numColors = 600;
+                document.getElementById('num-colors').value = 600;
+                createRainbowCircles();
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (morphingObject) {
+                morphingObject.rotation.x = rotationX;
+                morphingObject.rotation.y = rotationY;
+            }
+            if (endCircle) {
+                endCircle.rotation.x = rotationX;
+                endCircle.rotation.y = rotationY;
+            }
+            rainbowSpinAngle += 0.01;
+            if (rainbowGroup) {
+                rainbowGroup.rotation.x = rotationX;
+                rainbowGroup.rotation.y = rotationY + rainbowSpinAngle;
+            }
+            renderer.render(scene, camera);
+
+            // Update inputs (only when not focused, to avoid fighting user input)
+            const posY = document.getElementById('pos-y');
+            const rotXEl = document.getElementById('rot-x');
+            const slicesEl = document.getElementById('num-colors');
+            if (posY !== document.activeElement) posY.value = camera.position.y.toFixed(4);
+            if (rotXEl !== document.activeElement) rotXEl.value = rotationX.toFixed(12);
+            if (slicesEl !== document.activeElement) slicesEl.value = numColors;
+        }
+
+        init();
+    </script>
+</body>
+</html>
